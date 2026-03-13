@@ -9,7 +9,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 - `npm start` — runs the server on port 3000 (or `PORT` env var)
+- `npm test` — runs the test suite (`node --test test.js`)
 - No build step — vanilla HTML/CSS/JS served statically
+
+## Workflow
+
+- **Always run `npm test` before pushing.** Do not push if tests fail.
+- **Always add tests for new functionality.** Once a feature is working, write tests covering it before committing. Tests live in `test.js`.
 
 ## Architecture
 
