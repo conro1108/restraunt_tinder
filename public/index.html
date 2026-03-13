@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Grub Match</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- HOME -->
+  <div id="home" class="screen active">
+    <h1>🍔 Grub Match</h1>
+    <h2>Settle where to eat, together</h2>
+    <input id="hostName" placeholder="Your name" maxlength="30">
+    <button class="btn-primary" onclick="createSession()">Start a Session</button>
+  </div>
+
+  <!-- JOIN -->
+  <div id="join" class="screen">
+    <h1>🍔 Grub Match</h1>
+    <h2>Join session</h2>
+    <input id="joinName" placeholder="Your name" maxlength="30">
+    <button class="btn-primary" onclick="joinSession()">Join</button>
+  </div>
+
+  <!-- SUBMISSION PHASE -->
+  <div id="submission" class="screen">
+    <h1>📝 Add Suggestions</h1>
+    <div class="participants" id="subParticipants"></div>
+    <div class="share-link" id="shareLink" onclick="copyLink()">Tap to copy invite link</div>
+    <div class="add-form">
+      <input id="sugName" placeholder="Restaurant name" maxlength="60">
+      <textarea id="sugPitch" placeholder="Quick pitch (optional)" maxlength="200"></textarea>
+      <button class="btn-primary" onclick="addSuggestion()">Add</button>
+    </div>
+    <div class="suggestion-list" id="suggestionList"></div>
+    <button id="startMatchBtn" class="btn-danger" onclick="startMatching()" style="display:none">Start Matching →</button>
+  </div>
+
+  <!-- MATCHING PHASE -->
+  <div id="matching" class="screen">
+    <h1>🗳️ Vote</h1>
+    <div class="participants" id="matchParticipants"></div>
+    <div id="voteArea"></div>
+    <button id="endMatchBtn" class="btn-danger" onclick="endMatching()" style="display:none">End Voting & Show Results</button>
+  </div>
+
+  <!-- RESULTS -->
+  <div id="results" class="screen">
+    <h1>🏆 Results</h1>
+    <div class="suggestion-list" id="resultsList"></div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    let state = null;
+    let myParticipantId = null;
+    let sessionId = null;
+
+    // Check if joining via link
+    const path = window.location.pathname;
+    const joinMatch = path.match(/^\/s\/(.+)$/);
+
+    if (joinMatch) {
+      sessionId = joinMatch[1];
+      // Check if we've been here before (rejoin)
+      const saved = sessionStorage.getItem(`session_${sessionId}`);
+      if (saved) {
+        myParticipantId = saved;
+        socket.emit('rejoin', { sessionId, participantId: myParticipantId }, (res) => {
+          if (res.error) {
+            sessionStorage.removeItem(`session_${sessionId}`);
+            showScreen('join');
+          }
+        });
+      } else {
+        showScreen('join');
+      }
+    }
+
+    function showScreen(id) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    function createSession() {
+      const name = document.getElementById('hostName').value.trim();
+      if (!name) return;
+      socket.emit('create', name, (res) => {
+        sessionId = res.sessionId;
+        myParticipantId = res.participantId;
+        sessionStorage.setItem(`session_${sessionId}`, myParticipantId);
+        window.history.pushState({}, '', `/s/${sessionId}`);
+      });
+    }
+
+    function joinSession() {
+      const name = document.getElementById('joinName').value.trim();
+      if (!name) return;
+      socket.emit('join', { sessionId, name }, (res) => {
+        if (res.error) return alert(res.error);
+        myParticipantId = res.participantId;
+        sessionStorage.setItem(`session_${sessionId}`, myParticipantId);
+      });
+    }
+
+    function addSuggestion() {
+      const name = document.getElementById('sugName').value.trim();
+      const pitch = document.getElementById('sugPitch').value.trim();
+      if (!name) return;
+      socket.emit('suggest', { name, pitch }, () => {
+        document.getElementById('sugName').value = '';
+        document.getElementById('sugPitch').value = '';
+      });
+    }
+
+    function startMatching() {
+      socket.emit('startMatching', () => {});
+    }
+
+    function endMatching() {
+      socket.emit('endMatching', () => {});
+    }
+
+    function copyLink() {
+      const url = `${window.location.origin}/s/${sessionId}`;
+      navigator.clipboard.writeText(url).then(() => {
+        const el = document.getElementById('shareLink');
+        el.textContent = 'Copied!';
+        setTimeout(() => { el.textContent = url; }, 1500);
+      }).catch(() => {
+        // Fallback
+        const el = document.getElementById('shareLink');
+        el.textContent = `${window.location.origin}/s/${sessionId}`;
+      });
+    }
+
+    function renderParticipants(containerId, participants) {
+      const el = document.getElementById(containerId);
+      el.innerHTML = participants.map(p =>
+        `<span>${p.name}${p.isHost ? ' ★' : ''}</span>`
+      ).join('');
+    }
+
+    function renderSuggestions(suggestions) {
+      const el = document.getElementById('suggestionList');
+      el.innerHTML = suggestions.map(s => `
+        <div class="suggestion-item">
+          <div class="name">${esc(s.name)}</div>
+          ${s.pitch ? `<div class="pitch">${esc(s.pitch)}</div>` : ''}
+        </div>
+      `).join('');
+    }
+
+    function renderVoteCard(suggestions, votedOn) {
+      const area = document.getElementById('voteArea');
+      const remaining = suggestions.filter(s => !votedOn.includes(s.id));
+
+      if (remaining.length === 0) {
+        area.innerHTML = '<div class="waiting">Waiting for others to finish voting...</div>';
+        return;
+      }
+
+      const s = remaining[0];
+      area.innerHTML = `
+        <div class="vote-card">
+          <div class="name">${esc(s.name)}</div>
+          ${s.pitch ? `<div class="pitch">${esc(s.pitch)}</div>` : ''}
+          <div class="vote-buttons">
+            <button class="vote-btn veto" onclick="vote('${s.id}','veto')">🚫</button>
+            <button class="vote-btn meh" onclick="vote('${s.id}','meh')">😐</button>
+            <button class="vote-btn like" onclick="vote('${s.id}','like')">👍</button>
+          </div>
+        </div>
+        <div class="vote-progress">${votedOn.length + 1} of ${suggestions.length}</div>
+      `;
+    }
+
+    function vote(suggestionId, v) {
+      socket.emit('vote', { suggestionId, vote: v }, () => {});
+    }
+
+    function renderResults(results) {
+      const el = document.getElementById('resultsList');
+      el.innerHTML = results.map((r, i) => `
+        <div class="result-item">
+          <div class="name">${i === 0 ? '👑 ' : ''}${esc(r.name)}</div>
+          ${r.pitch ? `<div class="pitch">${esc(r.pitch)}</div>` : ''}
+          <div class="counts">
+            <span>👍 ${r.counts.like}</span>
+            <span>😐 ${r.counts.meh}</span>
+            <span>🚫 ${r.counts.veto}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function esc(str) {
+      const d = document.createElement('div');
+      d.textContent = str;
+      return d.innerHTML;
+    }
+
+    // Handle state updates
+    socket.on('state', (s) => {
+      state = s;
+
+      if (s.phase === 'submission') {
+        showScreen('submission');
+        renderParticipants('subParticipants', s.participants);
+        renderSuggestions(s.suggestions);
+        const link = `${window.location.origin}/s/${s.id}`;
+        document.getElementById('shareLink').textContent = link;
+        document.getElementById('startMatchBtn').style.display = s.isHost ? 'block' : 'none';
+      } else if (s.phase === 'matching') {
+        showScreen('matching');
+        renderParticipants('matchParticipants', s.participants);
+        renderVoteCard(s.suggestions, s.votedOn);
+        document.getElementById('endMatchBtn').style.display = s.isHost ? 'block' : 'none';
+      } else if (s.phase === 'results') {
+        showScreen('results');
+        renderResults(s.results);
+      }
+    });
+  </script>
+</body>
+</html>
