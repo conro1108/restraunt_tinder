@@ -104,6 +104,7 @@
       const name = document.getElementById('hostName').value.trim();
       if (!name) return;
       socket.emit('create', name, (res) => {
+        if (res.error) return alert(res.error);
         sessionId = res.sessionId;
         myParticipantId = res.participantId;
         sessionStorage.setItem(`session_${sessionId}`, myParticipantId);

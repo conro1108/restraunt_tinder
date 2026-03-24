@@ -150,6 +150,7 @@ io.on('connection', (socket) => {
     session.participants.set(participantId, { id: participantId, name: name.trim(), votesCount: 0 });
     currentSession = session;
     currentParticipantId = participantId;
+    session.lastActivity = Date.now();
     registerSocket();
     cb({ sessionId: session.id, participantId });
     broadcastState(session);
@@ -165,6 +166,7 @@ io.on('connection', (socket) => {
     }
     currentSession = session;
     currentParticipantId = participantId;
+    session.lastActivity = Date.now();
     socketMap.set(participantId, new Set([socket.id]));
     cb({});
     broadcastState(session);
@@ -201,7 +203,7 @@ io.on('connection', (socket) => {
     if (typeof cb !== 'function') return;
     if (!data || typeof data !== 'object') return cb({ error: 'Invalid request' });
     const { suggestionId, vote } = data;
-    if (!currentSession || currentSession.phase !== 'matching') return cb({ error: 'Not in matching phase' });
+    if (!currentSession || !currentParticipantId || currentSession.phase !== 'matching') return cb({ error: 'Not in matching phase' });
     if (!['like', 'meh', 'veto'].includes(vote)) return cb({ error: 'Invalid vote' });
     const suggestionExists = currentSession.suggestions.some(s => s.id === suggestionId);
     if (!suggestionExists) return cb({ error: 'Invalid suggestion' });
