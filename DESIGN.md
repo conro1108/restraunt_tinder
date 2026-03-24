@@ -42,52 +42,89 @@ The callback ignores the response object, so if `suggest` returns `{ error: '...
 
 Users have zero visibility into whether their connection is alive. On mobile, connections drop silently, and the UI looks normal while nothing works.
 
+### Bug 6: XSS in renderParticipants (found in review)
+
+`renderParticipants` uses raw string interpolation without escaping participant names. A malicious name like `<img src=x onerror=alert(1)>` would execute JavaScript.
+
+### Bug 7: No suggestion ID validation on votes (found in review)
+
+The `vote` handler doesn't verify that `suggestionId` actually exists in the session's suggestions array. A client could vote on a fabricated suggestion ID.
+
 ## Proposed Fixes
 
-### Fix 1: Client-side auto-rejoin on reconnect
+### Fix 1: Unified client-side rejoin via `connect` handler
 
-Listen for socket.io's `connect` event (fires on initial connect AND reconnects). If we have a `sessionId` and `myParticipantId`, automatically emit `rejoin`. This is the highest-impact fix.
+**Decision (from architect review):** Make the `connect` event handler the *single* place where rejoins happen. Remove the inline rejoin code from page load. The `connect` event fires on both initial connection and reconnections, so this handles both cases without a double-rejoin race condition.
 
 ```js
+// On page load, just restore from sessionStorage (no rejoin yet):
+if (joinMatch) {
+  sessionId = joinMatch[1];
+  const saved = sessionStorage.getItem(`session_${sessionId}`);
+  if (saved) {
+    myParticipantId = saved;
+    // rejoin will happen when connect fires
+  } else {
+    showScreen('join');
+  }
+}
+
 socket.on('connect', () => {
   if (sessionId && myParticipantId) {
     socket.emit('rejoin', { sessionId, participantId: myParticipantId }, (res) => {
-      if (res.error) { /* handle expired session */ }
+      if (res.error) {
+        sessionStorage.removeItem(`session_${sessionId}`);
+        myParticipantId = null;
+        showScreen('join');
+      }
     });
   }
 });
 ```
 
-### Fix 2: Server-side socket cleanup on rejoin
+### Fix 2: Replace (not accumulate) socketMap entries on rejoin
 
-When a participant rejoins, clear their old socket IDs from `socketMap` and register only the new one. This prevents stale entries.
-
-### Fix 3: Client-side error handling on suggest
-
-Check the callback response for errors. Only clear the form on success. Show feedback on failure.
+**Decision (from architect review):** On rejoin, replace the entire socket set for that participant rather than adding to it. A participant can only have one active socket (one browser tab). This eliminates stale socket accumulation.
 
 ```js
-socket.emit('suggest', { name, pitch }, (res) => {
-  if (res?.error) { /* show error */ return; }
-  // clear form
+socket.on('rejoin', ({ sessionId, participantId }, cb) => {
+  // ...validation...
+  socketMap.set(participantId, new Set([socket.id]));
+  // ...rest of handler...
 });
 ```
 
-### Fix 4: Connection status indicator
+### Fix 3: Client-side error handling on suggest
 
-Add a small visual indicator when the socket is disconnected/reconnecting so users know something is wrong and don't keep tapping buttons that won't work.
+Check the callback response for errors. Only clear the form on success. Show inline feedback on failure.
 
-### Fix 5: Disable interactive elements while disconnected
+### Fix 4: Connection status banner + input disabling
 
-Prevent users from submitting suggestions or votes while the socket is disconnected, since those actions will silently fail.
+Add a fixed-position "Reconnecting..." banner on `disconnect`, hide on `connect`. Disable all buttons/inputs while disconnected.
 
-### Fix 6: Server-side broadcastState robustness
+### Fix 5: XSS fix in renderParticipants
 
-Clean up dead socket IDs from socketMap when `io.to(socketId).emit()` targets a non-existent socket. Also, on rejoin, immediately send a fresh state to the rejoining socket so they catch up.
+Use the existing `esc()` function to escape participant names in `renderParticipants`.
+
+### Fix 6: Validate suggestion ID on vote
+
+Check that the `suggestionId` exists in `session.suggestions` before recording a vote.
+
+### ~~Fix 7: Server-side dead socket detection~~ REMOVED
+
+**Decision (from architect review):** Socket.io's `io.to(socketId).emit()` is fire-and-forget with no return value. There is no way to detect dead sockets at emit time. The socketMap replacement in Fix 2 handles the cleanup sufficiently.
+
+### Fix 8: Session TTL cleanup
+
+Add a periodic sweep or per-session timeout to remove sessions that have been inactive. Prevents unbounded memory growth.
+
+### Fix 9: Accessibility — aria-labels on vote buttons
+
+Add explicit `aria-label` attributes to emoji-only vote buttons for screen reader support.
 
 ## Data Model Changes
 
-None — the in-memory data model is unchanged. The fixes are purely in the Socket.io connection lifecycle and client-side error handling.
+- Add `lastActivity` timestamp to sessions for TTL cleanup
 
 ## API Changes
 
@@ -99,6 +136,14 @@ No new events. Existing events are unchanged. The `rejoin` event is already impl
 2. **No server-side heartbeat**: Socket.io has built-in ping/pong. We don't need custom heartbeats.
 3. **Optimistic UI with error rollback**: Keep the current pattern of immediate UI updates via state broadcasts, but add error feedback when actions fail.
 4. **Connection banner, not toast**: A persistent banner while disconnected is better than toasts that disappear, since disconnection can last several seconds.
+5. **Single rejoin path**: All rejoins (page load + reconnect) go through the `connect` handler to avoid race conditions.
+6. **Replace, don't accumulate**: socketMap entries are fully replaced on rejoin rather than grown. One participant = one socket.
+7. **No dead-socket detection at emit time**: Socket.io doesn't support this. Cleanup happens proactively on rejoin.
+
+## Threat Model (from architect review)
+
+- `participantId` (12-char nanoid, ~72 bits entropy) is an unauthenticated bearer token. Acceptable for a casual app with no login system.
+- `sessionId` (8-char nanoid, ~48 bits) is visible in URLs. Combined with unlimited rejoin attempts, this could theoretically allow session hijacking. For the current use case (friends sharing links), this is acceptable. Rate limiting on rejoin would mitigate this if needed in the future.
 
 ## User Flow: Reconnection
 
@@ -106,14 +151,18 @@ No new events. Existing events are unchanged. The `rejoin` event is already impl
 2. UI shows "Reconnecting..." banner, disables inputs
 3. Socket.io auto-reconnects (built-in exponential backoff)
 4. Client `connect` event fires → auto-emits `rejoin`
-5. Server re-registers socket in room and socketMap
+5. Server replaces socketMap entry, re-joins room
 6. Server broadcasts fresh state to the rejoined participant
 7. Banner hides, inputs re-enable
 8. User sees current state (any suggestions/votes added while disconnected now visible)
 
 ## Testing Plan
 
-- Test reconnection by having a client rejoin and verifying they receive state
+- Test reconnection by having a client rejoin from a new socket and verifying state
+- Test that stale sockets are replaced (not accumulated) on rejoin
 - Test that suggest errors are properly returned to client
-- Test that stale sockets are cleaned from socketMap on rejoin
 - Test that broadcastState reaches all registered participants
+- Test that invalid suggestion IDs are rejected on vote
+- Test session TTL cleanup
+- Test concurrent join/suggest operations
+- Test that all participant actions after rejoin work correctly (suggest, vote, startMatching)
