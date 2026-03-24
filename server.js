@@ -18,6 +18,8 @@ app.get('/s/:id', (req, res) => {
 // In-memory session store
 const sessions = new Map();
 
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+
 function createSession(hostName) {
   const id = nanoid(8);
   const hostId = nanoid(12);
@@ -28,6 +30,7 @@ function createSession(hostName) {
     participants: new Map([[hostId, { id: hostId, name: hostName, votesCount: 0 }]]),
     suggestions: [],
     votes: new Map(), // participantId -> Map(suggestionId -> 'like'|'meh'|'veto')
+    lastActivity: Date.now(),
   };
   sessions.set(id, session);
   return { session, hostId };
@@ -92,6 +95,18 @@ function checkAllVotesIn(session) {
 // Track socket -> participant mapping for targeted broadcasts
 const socketMap = new Map(); // participantId -> Set<socketId>
 
+const cleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions) {
+    if (now - session.lastActivity > SESSION_TTL_MS) {
+      for (const participantId of session.participants.keys()) {
+        socketMap.delete(participantId);
+      }
+      sessions.delete(id);
+    }
+  }
+}, 15 * 60 * 1000); // run every 15 minutes
+
 io.on('connection', (socket) => {
   let currentSession = null;
   let currentParticipantId = null;
@@ -141,7 +156,7 @@ io.on('connection', (socket) => {
     currentSession = session;
     currentParticipantId = participantId;
     socket.join(session.id);
-    registerSocket();
+    socketMap.set(participantId, new Set([socket.id]));
     cb({});
     broadcastState(session);
   });
@@ -150,6 +165,7 @@ io.on('connection', (socket) => {
     if (!currentSession || currentSession.phase !== 'submission') return cb?.({ error: 'Cannot add suggestions now' });
     const suggestion = { id: nanoid(8), name, pitch: pitch || '' };
     currentSession.suggestions.push(suggestion);
+    currentSession.lastActivity = Date.now();
     cb?.({});
     broadcastState(currentSession);
   });
@@ -158,6 +174,7 @@ io.on('connection', (socket) => {
     if (!currentSession || currentParticipantId !== currentSession.hostId) return cb?.({ error: 'Not host' });
     if (currentSession.suggestions.length === 0) return cb?.({ error: 'No suggestions yet' });
     currentSession.phase = 'matching';
+    currentSession.lastActivity = Date.now();
     cb?.({});
     broadcastState(currentSession);
   });
@@ -165,6 +182,8 @@ io.on('connection', (socket) => {
   socket.on('vote', ({ suggestionId, vote }, cb) => {
     if (!currentSession || currentSession.phase !== 'matching') return cb?.({ error: 'Not in matching phase' });
     if (!['like', 'meh', 'veto'].includes(vote)) return cb?.({ error: 'Invalid vote' });
+    const suggestionExists = currentSession.suggestions.some(s => s.id === suggestionId);
+    if (!suggestionExists) return cb?.({ error: 'Invalid suggestion' });
 
     if (!currentSession.votes.has(currentParticipantId)) {
       currentSession.votes.set(currentParticipantId, new Map());
@@ -174,6 +193,7 @@ io.on('connection', (socket) => {
 
     myVotes.set(suggestionId, vote);
     currentSession.participants.get(currentParticipantId).votesCount = myVotes.size;
+    currentSession.lastActivity = Date.now();
     cb?.({});
 
     if (checkAllVotesIn(currentSession)) {
@@ -185,6 +205,7 @@ io.on('connection', (socket) => {
   socket.on('endMatching', (cb) => {
     if (!currentSession || currentParticipantId !== currentSession.hostId) return cb?.({ error: 'Not host' });
     currentSession.phase = 'results';
+    currentSession.lastActivity = Date.now();
     cb?.({});
     broadcastState(currentSession);
   });
@@ -212,6 +233,7 @@ function start(port) {
 }
 
 function stop() {
+  clearInterval(cleanupInterval);
   return new Promise((resolve) => {
     io.close();
     server.close(resolve);

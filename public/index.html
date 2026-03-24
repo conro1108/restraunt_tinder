@@ -8,6 +8,8 @@
 </head>
 <body>
 
+  <div id="connectionBanner" class="connection-banner" hidden>Reconnecting...</div>
+
   <!-- HOME -->
   <div id="home" class="screen active">
     <h1>🍔 Grub Match</h1>
@@ -65,20 +67,33 @@
 
     if (joinMatch) {
       sessionId = joinMatch[1];
-      // Check if we've been here before (rejoin)
       const saved = sessionStorage.getItem(`session_${sessionId}`);
       if (saved) {
         myParticipantId = saved;
-        socket.emit('rejoin', { sessionId, participantId: myParticipantId }, (res) => {
-          if (res.error) {
-            sessionStorage.removeItem(`session_${sessionId}`);
-            showScreen('join');
-          }
-        });
+        // rejoin happens in the connect handler below
       } else {
         showScreen('join');
       }
     }
+
+    socket.on('connect', () => {
+      document.getElementById('connectionBanner').hidden = true;
+      document.querySelectorAll('button, input, textarea').forEach(el => el.disabled = false);
+      if (sessionId && myParticipantId) {
+        socket.emit('rejoin', { sessionId, participantId: myParticipantId }, (res) => {
+          if (res.error) {
+            sessionStorage.removeItem(`session_${sessionId}`);
+            myParticipantId = null;
+            showScreen('home');
+          }
+        });
+      }
+    });
+
+    socket.on('disconnect', () => {
+      document.getElementById('connectionBanner').hidden = false;
+      document.querySelectorAll('button, input, textarea').forEach(el => el.disabled = true);
+    });
 
     function showScreen(id) {
       document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -110,7 +125,8 @@
       const name = document.getElementById('sugName').value.trim();
       const pitch = document.getElementById('sugPitch').value.trim();
       if (!name) return;
-      socket.emit('suggest', { name, pitch }, () => {
+      socket.emit('suggest', { name, pitch }, (res) => {
+        if (res?.error) return;
         document.getElementById('sugName').value = '';
         document.getElementById('sugPitch').value = '';
       });
@@ -140,7 +156,7 @@
     function renderParticipants(containerId, participants) {
       const el = document.getElementById(containerId);
       el.innerHTML = participants.map(p =>
-        `<span>${p.name}${p.isHost ? ' ★' : ''}</span>`
+        `<span>${esc(p.name)}${p.isHost ? ' ★' : ''}</span>`
       ).join('');
     }
 
@@ -169,9 +185,9 @@
           <div class="name">${esc(s.name)}</div>
           ${s.pitch ? `<div class="pitch">${esc(s.pitch)}</div>` : ''}
           <div class="vote-buttons">
-            <button class="vote-btn veto" onclick="vote('${s.id}','veto')">🚫</button>
-            <button class="vote-btn meh" onclick="vote('${s.id}','meh')">😐</button>
-            <button class="vote-btn like" onclick="vote('${s.id}','like')">👍</button>
+            <button class="vote-btn veto" aria-label="Veto" onclick="vote('${s.id}','veto')">🚫</button>
+            <button class="vote-btn meh" aria-label="Meh" onclick="vote('${s.id}','meh')">😐</button>
+            <button class="vote-btn like" aria-label="Like" onclick="vote('${s.id}','like')">👍</button>
           </div>
         </div>
         <div class="vote-progress">${votedOn.length + 1} of ${suggestions.length}</div>
