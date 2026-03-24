@@ -84,7 +84,7 @@
           if (res.error) {
             sessionStorage.removeItem(`session_${sessionId}`);
             myParticipantId = null;
-            showScreen('home');
+            showScreen(sessionId ? 'join' : 'home');
           }
         });
       }

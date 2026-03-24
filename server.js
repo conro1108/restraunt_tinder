@@ -15,6 +15,8 @@ app.get('/s/:id', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+app.get('/health', (req, res) => res.sendStatus(200));
+
 // In-memory session store
 const sessions = new Map();
 
@@ -124,77 +126,96 @@ io.on('connection', (socket) => {
   });
 
   socket.on('create', (name, cb) => {
-    const { session, hostId } = createSession(name);
+    if (typeof cb !== 'function') return;
+    if (typeof name !== 'string' || !name.trim() || name.length > 60) return cb({ error: 'Invalid name' });
+    const { session, hostId } = createSession(name.trim());
     currentSession = session;
     currentParticipantId = hostId;
-    socket.join(session.id);
     registerSocket();
     cb({ sessionId: session.id, participantId: hostId });
     broadcastState(session);
   });
 
-  socket.on('join', ({ sessionId, name }, cb) => {
+  socket.on('join', (data, cb) => {
+    if (typeof cb !== 'function') return;
+    if (!data || typeof data !== 'object') return cb({ error: 'Invalid request' });
+    const { sessionId, name } = data;
+    if (typeof name !== 'string' || !name.trim() || name.length > 60) return cb({ error: 'Invalid name' });
     const session = sessions.get(sessionId);
     if (!session) return cb({ error: 'Session not found' });
     if (session.phase !== 'submission') return cb({ error: 'Session already in progress' });
+    if (session.participants.size >= 50) return cb({ error: 'Session is full' });
 
     const participantId = nanoid(12);
-    session.participants.set(participantId, { id: participantId, name, votesCount: 0 });
+    session.participants.set(participantId, { id: participantId, name: name.trim(), votesCount: 0 });
     currentSession = session;
     currentParticipantId = participantId;
-    socket.join(session.id);
     registerSocket();
     cb({ sessionId: session.id, participantId });
     broadcastState(session);
   });
 
-  socket.on('rejoin', ({ sessionId, participantId }, cb) => {
+  socket.on('rejoin', (data, cb) => {
+    if (typeof cb !== 'function') return;
+    if (!data || typeof data !== 'object') return cb({ error: 'Invalid request' });
+    const { sessionId, participantId } = data;
     const session = sessions.get(sessionId);
     if (!session || !session.participants.has(participantId)) {
       return cb({ error: 'Session not found' });
     }
     currentSession = session;
     currentParticipantId = participantId;
-    socket.join(session.id);
     socketMap.set(participantId, new Set([socket.id]));
     cb({});
     broadcastState(session);
   });
 
-  socket.on('suggest', ({ name, pitch }, cb) => {
-    if (!currentSession || currentSession.phase !== 'submission') return cb?.({ error: 'Cannot add suggestions now' });
-    const suggestion = { id: nanoid(8), name, pitch: pitch || '' };
+  socket.on('suggest', (data, cb) => {
+    if (typeof cb !== 'function') return;
+    if (!data || typeof data !== 'object') return cb({ error: 'Invalid request' });
+    const { name, pitch } = data;
+    if (!currentSession || currentSession.phase !== 'submission') return cb({ error: 'Cannot add suggestions now' });
+    if (typeof name !== 'string' || !name.trim()) return cb({ error: 'Name required' });
+    if (name.length > 200) return cb({ error: 'Name too long' });
+    if (pitch != null && typeof pitch !== 'string') return cb({ error: 'Invalid pitch' });
+    if (pitch && pitch.length > 1000) return cb({ error: 'Pitch too long' });
+    if (currentSession.suggestions.length >= 50) return cb({ error: 'Too many suggestions' });
+    const suggestion = { id: nanoid(8), name: name.trim(), pitch: (pitch || '').trim() };
     currentSession.suggestions.push(suggestion);
     currentSession.lastActivity = Date.now();
-    cb?.({});
+    cb({});
     broadcastState(currentSession);
   });
 
   socket.on('startMatching', (cb) => {
-    if (!currentSession || currentParticipantId !== currentSession.hostId) return cb?.({ error: 'Not host' });
-    if (currentSession.suggestions.length === 0) return cb?.({ error: 'No suggestions yet' });
+    if (typeof cb !== 'function') return;
+    if (!currentSession || currentParticipantId !== currentSession.hostId) return cb({ error: 'Not host' });
+    if (currentSession.suggestions.length === 0) return cb({ error: 'No suggestions yet' });
     currentSession.phase = 'matching';
     currentSession.lastActivity = Date.now();
-    cb?.({});
+    cb({});
     broadcastState(currentSession);
   });
 
-  socket.on('vote', ({ suggestionId, vote }, cb) => {
-    if (!currentSession || currentSession.phase !== 'matching') return cb?.({ error: 'Not in matching phase' });
-    if (!['like', 'meh', 'veto'].includes(vote)) return cb?.({ error: 'Invalid vote' });
+  socket.on('vote', (data, cb) => {
+    if (typeof cb !== 'function') return;
+    if (!data || typeof data !== 'object') return cb({ error: 'Invalid request' });
+    const { suggestionId, vote } = data;
+    if (!currentSession || currentSession.phase !== 'matching') return cb({ error: 'Not in matching phase' });
+    if (!['like', 'meh', 'veto'].includes(vote)) return cb({ error: 'Invalid vote' });
     const suggestionExists = currentSession.suggestions.some(s => s.id === suggestionId);
-    if (!suggestionExists) return cb?.({ error: 'Invalid suggestion' });
+    if (!suggestionExists) return cb({ error: 'Invalid suggestion' });
 
     if (!currentSession.votes.has(currentParticipantId)) {
       currentSession.votes.set(currentParticipantId, new Map());
     }
     const myVotes = currentSession.votes.get(currentParticipantId);
-    if (myVotes.has(suggestionId)) return cb?.({ error: 'Already voted' });
+    if (myVotes.has(suggestionId)) return cb({ error: 'Already voted' });
 
     myVotes.set(suggestionId, vote);
     currentSession.participants.get(currentParticipantId).votesCount = myVotes.size;
     currentSession.lastActivity = Date.now();
-    cb?.({});
+    cb({});
 
     if (checkAllVotesIn(currentSession)) {
       currentSession.phase = 'results';
@@ -203,10 +224,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('endMatching', (cb) => {
-    if (!currentSession || currentParticipantId !== currentSession.hostId) return cb?.({ error: 'Not host' });
+    if (typeof cb !== 'function') return;
+    if (!currentSession || currentParticipantId !== currentSession.hostId) return cb({ error: 'Not host' });
     currentSession.phase = 'results';
     currentSession.lastActivity = Date.now();
-    cb?.({});
+    cb({});
     broadcastState(currentSession);
   });
 });

@@ -702,3 +702,103 @@ describe('session TTL', () => {
     host.socket.disconnect();
   });
 });
+
+// ─── INPUT VALIDATION ───────────────────────────────────────────────
+
+describe('input validation', () => {
+  it('rejects create with empty name', async () => {
+    const sock = await connect();
+    const res = await emit(sock, 'create', '  ');
+    assert.ok(res.error);
+    sock.disconnect();
+  });
+
+  it('rejects create with non-string name', async () => {
+    const sock = await connect();
+    const res = await emit(sock, 'create', 123);
+    assert.ok(res.error);
+    sock.disconnect();
+  });
+
+  it('rejects create with overly long name', async () => {
+    const sock = await connect();
+    const res = await emit(sock, 'create', 'A'.repeat(100));
+    assert.ok(res.error);
+    sock.disconnect();
+  });
+
+  it('rejects join with empty name', async () => {
+    const host = await createSession();
+    const sock = await connect();
+    const res = await emit(sock, 'join', { sessionId: host.sessionId, name: '' });
+    assert.ok(res.error);
+    host.socket.disconnect();
+    sock.disconnect();
+  });
+
+  it('rejects suggest with empty name', async () => {
+    const host = await createSession();
+    const res = await emit(host.socket, 'suggest', { name: '  ', pitch: '' });
+    assert.ok(res.error);
+    host.socket.disconnect();
+  });
+
+  it('rejects suggest with overly long name', async () => {
+    const host = await createSession();
+    const res = await emit(host.socket, 'suggest', { name: 'X'.repeat(201), pitch: '' });
+    assert.ok(res.error);
+    host.socket.disconnect();
+  });
+
+  it('rejects suggest when too many suggestions', async () => {
+    const host = await createSession();
+    for (let i = 0; i < 50; i++) {
+      await emit(host.socket, 'suggest', { name: `Place${i}` });
+    }
+    // 51st should fail
+    const res = await emit(host.socket, 'suggest', { name: 'OneMore' });
+    assert.ok(res.error);
+    assert.equal(res.error, 'Too many suggestions');
+    host.socket.disconnect();
+  });
+
+  it('rejects join when session is full', async () => {
+    const host = await createSession();
+    // Join 49 guests (50 total with host)
+    const sockets = [host.socket];
+    for (let i = 0; i < 49; i++) {
+      const g = await joinSession(host.sessionId, `G${i}`);
+      sockets.push(g.socket);
+    }
+    // 51st participant should be rejected
+    const sock = await connect();
+    const res = await emit(sock, 'join', { sessionId: host.sessionId, name: 'Overflow' });
+    assert.ok(res.error);
+    assert.equal(res.error, 'Session is full');
+    sock.disconnect();
+    sockets.forEach(s => s.disconnect());
+  });
+
+  it('trims whitespace from names', async () => {
+    const { socket, state } = await createSession('  Alice  ');
+    assert.equal(state.participants[0].name, 'Alice');
+    socket.disconnect();
+  });
+
+  it('trims whitespace from suggestion names', async () => {
+    const host = await createSession();
+    const { state } = await emitAndWait(host.socket, 'suggest', { name: '  Tacos  ', pitch: '  yum  ' });
+    assert.equal(state.suggestions[0].name, 'Tacos');
+    assert.equal(state.suggestions[0].pitch, 'yum');
+    host.socket.disconnect();
+  });
+});
+
+// ─── HEALTH CHECK ───────────────────────────────────────────────────
+
+describe('health check', () => {
+  it('returns 200 on /health', async () => {
+    const res = await fetch(`http://localhost:${PORT}/health`);
+    assert.equal(res.status, 200);
+  });
+});
